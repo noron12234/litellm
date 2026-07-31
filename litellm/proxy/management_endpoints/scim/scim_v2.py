@@ -165,8 +165,9 @@ def _to_domain_user(row: "PrismaUserTable | None") -> Optional[LiteLLM_UserTable
 def _to_domain_user(row: "PrismaUserTable | None") -> Optional[LiteLLM_UserTable]:
     if row is None:
         return None
-    data = row if isinstance(row, dict) else row.model_dump()
-    return LiteLLM_UserTable.model_validate(data)
+    if isinstance(row, dict):
+        return LiteLLM_UserTable.model_validate(row)
+    return LiteLLM_UserTable.model_construct(**vars(row))
 
 
 @overload
@@ -176,8 +177,9 @@ def _to_domain_team(row: "PrismaTeamTable | None") -> Optional[LiteLLM_TeamTable
 def _to_domain_team(row: "PrismaTeamTable | None") -> Optional[LiteLLM_TeamTable]:
     if row is None:
         return None
-    data = row if isinstance(row, dict) else row.model_dump()
-    return LiteLLM_TeamTable.model_validate(data)
+    if isinstance(row, dict):
+        return LiteLLM_TeamTable.model_validate(row)
+    return LiteLLM_TeamTable.model_construct(**vars(row))
 
 
 class UserProvisionerHelpers:
@@ -2379,7 +2381,7 @@ async def _process_group_patch_operations(
 
 async def _apply_group_patch_updates(
     group_id: str, update_data: Dict[str, object], prisma_client: PrismaClient
-) -> Optional[LiteLLM_TeamTable]:
+) -> "PrismaTeamTable | None":
     """Apply the group's metadata/displayName patch updates to the database.
 
     Membership itself is not written here; it is reconciled onto the source of
@@ -2392,13 +2394,11 @@ async def _apply_group_patch_updates(
         update_data["metadata"] = safe_dumps(update_data["metadata"])
 
     if update_data:
-        return _to_domain_team(
-            await _table(TeamRepository(prisma_client)).update(
-                where={"team_id": group_id},
-                data=update_data,
-            )
+        return await _table(TeamRepository(prisma_client)).update(
+            where={"team_id": group_id},
+            data=update_data,
         )
-    return _to_domain_team(await _table(TeamRepository(prisma_client)).find_unique(where={"team_id": group_id}))
+    return await _table(TeamRepository(prisma_client)).find_unique(where={"team_id": group_id})
 
 
 async def _handle_group_membership_changes(group_id: str, current_members: Set[str], final_members: Set[str]):
@@ -2458,7 +2458,7 @@ async def patch_group(
         intended_remove = snapshot_members - final_members
 
         # Apply the metadata/displayName updates to the database
-        updated_team = await _apply_group_patch_updates(group_id, update_data, prisma_client)
+        updated_team = _to_domain_team(await _apply_group_patch_updates(group_id, update_data, prisma_client))
 
         refreshed_team = await _table(TeamRepository(prisma_client)).find_unique(where={"team_id": group_id})
         refreshed_current = (
