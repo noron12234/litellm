@@ -163,7 +163,10 @@ def _to_domain_user(row: "PrismaUserTable") -> LiteLLM_UserTable: ...
 @overload
 def _to_domain_user(row: "PrismaUserTable | None") -> Optional[LiteLLM_UserTable]: ...
 def _to_domain_user(row: "PrismaUserTable | None") -> Optional[LiteLLM_UserTable]:
-    return None if row is None else LiteLLM_UserTable.model_validate(row.model_dump())
+    if row is None:
+        return None
+    data = row if isinstance(row, dict) else row.model_dump()
+    return LiteLLM_UserTable.model_validate(data)
 
 
 @overload
@@ -171,7 +174,10 @@ def _to_domain_team(row: "PrismaTeamTable") -> LiteLLM_TeamTable: ...
 @overload
 def _to_domain_team(row: "PrismaTeamTable | None") -> Optional[LiteLLM_TeamTable]: ...
 def _to_domain_team(row: "PrismaTeamTable | None") -> Optional[LiteLLM_TeamTable]:
-    return None if row is None else LiteLLM_TeamTable.model_validate(row.model_dump())
+    if row is None:
+        return None
+    data = row if isinstance(row, dict) else row.model_dump()
+    return LiteLLM_TeamTable.model_validate(data)
 
 
 class UserProvisionerHelpers:
