@@ -157,12 +157,31 @@ class ModelInfo(BaseModel):
     # admin-toggled pause flag; mirrors LiteLLM_ProxyModelTable.blocked
     blocked: Optional[bool] = None
 
+    ptu_count: int | None = None
+    cost_per_ptu_per_hour: float | None = None
+    ptu_effective_from: datetime.datetime | None = None
+    ptu_effective_to: datetime.datetime | None = None
+
     def __init__(self, id: Optional[Union[str, int]] = None, **params):
         if id is None:
             id = str(uuid.uuid4())  # Generate a UUID if id is None or not provided
         elif isinstance(id, int):
             id = str(id)
         super().__init__(id=id, **params)
+
+    @model_validator(mode="after")
+    def _validate_ptu_bounds(self) -> "ModelInfo":
+        if self.ptu_count is not None and self.ptu_count <= 0:
+            raise ValueError("ptu_count must be a positive integer")
+        if self.cost_per_ptu_per_hour is not None and self.cost_per_ptu_per_hour < 0:
+            raise ValueError("cost_per_ptu_per_hour must be non-negative")
+        if (
+            self.ptu_effective_from is not None
+            and self.ptu_effective_to is not None
+            and self.ptu_effective_to <= self.ptu_effective_from
+        ):
+            raise ValueError("ptu_effective_to must be after ptu_effective_from")
+        return self
 
     model_config = ConfigDict(extra="allow")
 

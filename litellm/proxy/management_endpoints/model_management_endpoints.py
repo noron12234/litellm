@@ -142,6 +142,25 @@ def _raise_on_strategy_router_write_violation(
     )
 
 
+def _validate_ptu_model_info(model_info: Mapping[str, object]) -> None:
+    """Enforce the PTU cross-field invariant on the effective model_info.
+
+    ptu_count and cost_per_ptu_per_hour must be set together, and a team_id is
+    required when they are (one model maps to one team). Per-field bounds
+    (positive count, non-negative rate) are enforced by ModelInfo itself.
+    """
+    has_count = model_info.get("ptu_count") is not None
+    has_rate = model_info.get("cost_per_ptu_per_hour") is not None
+    if not has_count and not has_rate:
+        return
+    if has_count != has_rate:
+        raise HTTPException(status_code=400, detail="ptu_count and cost_per_ptu_per_hour must be set together")
+    if not model_info.get("team_id"):
+        raise HTTPException(
+            status_code=400, detail="team_id is required when PTU fields are set (one model maps to one team)"
+        )
+
+
 def update_db_model(db_model: Deployment, updated_patch: updateDeployment) -> PrismaCompatibleUpdateDBModel:
     merged_deployment_dict = DeploymentTypedDict(
         model_name=db_model.model_name,
@@ -200,6 +219,7 @@ def update_db_model(db_model: Deployment, updated_patch: updateDeployment) -> Pr
 
     if "model_info" in merged_deployment_dict:
         model_info = merged_deployment_dict["model_info"]
+        _validate_ptu_model_info(model_info)
         for key, value in model_info.items():
             if isinstance(value, datetime.datetime):
                 model_info[key] = value.isoformat()
@@ -1348,6 +1368,8 @@ async def add_new_model(
 
         model_response: Optional[LiteLLM_ProxyModelTable] = None
         # update DB
+        _validate_ptu_model_info(model_params.model_info.model_dump(exclude_none=True))
+
         if store_model_in_db is True:
             """
             - store model_list in db
