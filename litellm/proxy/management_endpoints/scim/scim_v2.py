@@ -4,6 +4,7 @@
 This is an enterprise feature and requires a premium license.
 """
 
+import json
 import re
 from collections.abc import Mapping, Sequence
 from itertools import chain
@@ -17,6 +18,7 @@ from typing import (
     Protocol,
     Set,
     Tuple,
+    TypeVar,
     overload,
 )
 
@@ -158,6 +160,24 @@ def _table(
     return prisma_table
 
 
+def _with_decoded_json_fields(data: Mapping[str, object], fields: tuple[str, ...]) -> dict[str, object]:
+    return {
+        key: (json.loads(value) if key in fields and isinstance(value, str) else value)
+        for key, value in data.items()
+    }
+
+
+_DomainModel = TypeVar("_DomainModel", bound=BaseModel)
+
+
+def _construct_from_data(model_class: type[_DomainModel], data: Mapping[str, object]) -> _DomainModel:
+    instance = model_class.model_construct()
+    for key, value in data.items():
+        if key in model_class.model_fields:
+            setattr(instance, key, value)
+    return instance
+
+
 @overload
 def _to_domain_user(row: "PrismaUserTable") -> LiteLLM_UserTable: ...
 @overload
@@ -165,9 +185,8 @@ def _to_domain_user(row: "PrismaUserTable | None") -> Optional[LiteLLM_UserTable
 def _to_domain_user(row: "PrismaUserTable | None") -> Optional[LiteLLM_UserTable]:
     if row is None:
         return None
-    if isinstance(row, dict):
-        return LiteLLM_UserTable.model_validate(row)
-    return LiteLLM_UserTable.model_construct(**vars(row))
+    data = _with_decoded_json_fields(row, ("metadata",)) if isinstance(row, dict) else vars(row)
+    return _construct_from_data(LiteLLM_UserTable, data)
 
 
 @overload
@@ -177,9 +196,10 @@ def _to_domain_team(row: "PrismaTeamTable | None") -> Optional[LiteLLM_TeamTable
 def _to_domain_team(row: "PrismaTeamTable | None") -> Optional[LiteLLM_TeamTable]:
     if row is None:
         return None
-    if isinstance(row, dict):
-        return LiteLLM_TeamTable.model_validate(row)
-    return LiteLLM_TeamTable.model_construct(**vars(row))
+    data = (
+        _with_decoded_json_fields(row, ("metadata", "members_with_roles")) if isinstance(row, dict) else vars(row)
+    )
+    return _construct_from_data(LiteLLM_TeamTable, data)
 
 
 class UserProvisionerHelpers:
@@ -231,17 +251,15 @@ class UserProvisionerHelpers:
             raise_on_error=True,
         )
 
-        updated_user = _to_domain_user(
-            await _table(UserRepository(prisma_client)).update(
-                where={"user_id": new_user_request.user_id},
-                data={
-                    "user_email": new_user_request.user_email,
-                    "user_alias": new_user_request.user_alias,
-                    "teams": new_teams,
-                    "metadata": safe_dumps(new_user_request.metadata),
-                    **({"user_role": new_user_request.user_role} if admin_group is not None else {}),
-                },
-            )
+        updated_user = await _table(UserRepository(prisma_client)).update(
+            where={"user_id": new_user_request.user_id},
+            data={
+                "user_email": new_user_request.user_email,
+                "user_alias": new_user_request.user_alias,
+                "teams": new_teams,
+                "metadata": safe_dumps(new_user_request.metadata),
+                **({"user_role": new_user_request.user_role} if admin_group is not None else {}),
+            },
         )
 
         return await ScimTransformations.transform_litellm_user_to_scim_user(updated_user)
