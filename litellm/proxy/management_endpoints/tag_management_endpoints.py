@@ -31,6 +31,7 @@ from litellm.proxy.management_endpoints.common_daily_activity import (
     get_daily_activity,
 )
 from litellm.proxy.management_helpers.utils import handle_budget_for_entity
+from litellm.proxy.model_list_cache import invalidate_model_list_cache
 from litellm.repositories.model_repository import ModelRepository
 from litellm.repositories.table_repositories import (
     DailyTagSpendRepository,
@@ -373,6 +374,7 @@ async def _add_tag_to_deployment(deployment: "Deployment", tag: str):
             where={"model_id": deployment.model_info.id},
             data={"litellm_params": json.dumps(existing_params)},
         )
+        await invalidate_model_list_cache()
     except Exception as e:
         verbose_proxy_logger.exception(f"Error adding tag to deployment: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
