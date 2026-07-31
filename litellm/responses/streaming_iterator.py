@@ -447,11 +447,7 @@ class BaseResponsesAPIStreamingIterator:
         async_failure_handler / failure_handler so logging integrations correctly
         record the call as failed.
         """
-        response_obj = (
-            self.completed_response.response
-            if isinstance(self.completed_response, _RESPONSE_EVENT_TYPES_WITH_RESPONSE)
-            else None
-        )
+        response_obj = getattr(self.completed_response, "response", None)
         error_info = getattr(response_obj, "error", None)
         error_message, error_type, error_code = _error_event_fields(error_info)
         self._record_failed_response_usage(response_obj)
@@ -1388,7 +1384,7 @@ class ResponsesWebSocketStreaming:
     def _should_store_event(self, event_obj: dict) -> bool:
         return event_obj.get("type") in RESPONSES_WS_LOGGED_EVENT_TYPES
 
-    def _store_event(self, event: Any) -> None:
+    def _store_event(self, event: Union[str, bytes, Dict[str, Any]]) -> None:
         if isinstance(event, bytes):
             event = event.decode("utf-8")
         if isinstance(event, str):
@@ -1402,7 +1398,7 @@ class ResponsesWebSocketStreaming:
         if self._should_store_event(event_obj):
             self.messages.append(event_obj)
 
-    def _collect_input_from_client_event(self, message: Any) -> None:
+    def _collect_input_from_client_event(self, message: Union[str, Dict[str, Any]]) -> None:
         """Extract user input content from response.create for logging."""
         try:
             if isinstance(message, str):
@@ -1437,7 +1433,7 @@ class ResponsesWebSocketStreaming:
         except (json.JSONDecodeError, AttributeError, TypeError):
             pass
 
-    def _store_input(self, message: Any) -> None:
+    def _store_input(self, message: Union[str, Dict[str, Any]]) -> None:
         self._collect_input_from_client_event(message)
         if self.logging_obj:
             self.logging_obj.pre_call(input=message, api_key="")
@@ -1994,7 +1990,7 @@ class ManagedResponsesWebSocketHandler:
         return messages
 
     @staticmethod
-    def _input_to_messages(input_val: Any) -> List[Dict[str, Any]]:
+    def _input_to_messages(input_val: object) -> List[Dict[str, Any]]:
         """
         Normalise the ``input`` field of a ``response.create`` event to a list
         of Responses API message dicts.

@@ -13,7 +13,7 @@ Mirrors Anthropic's native ``compact_20260112`` for non-Anthropic providers:
 """
 
 import re
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, TypedDict, Union, cast
 
 import litellm
 from litellm._logging import verbose_logger
@@ -148,12 +148,12 @@ async def _check_summary_model_access(
     except Exception:
         return True
 
-    key_models = list(user_api_key_auth.models or [])
-    team_id = user_api_key_auth.team_id
-    team_model_aliases = user_api_key_auth.team_model_aliases
-    team_models = list(user_api_key_auth.team_models or [])
-    user_id = user_api_key_auth.user_id
-    project_id = user_api_key_auth.project_id
+    key_models = list(getattr(user_api_key_auth, "models", None) or [])
+    team_id = getattr(user_api_key_auth, "team_id", None)
+    team_model_aliases = getattr(user_api_key_auth, "team_model_aliases", None)
+    team_models = list(getattr(user_api_key_auth, "team_models", None) or [])
+    user_id = getattr(user_api_key_auth, "user_id", None)
+    project_id = getattr(user_api_key_auth, "project_id", None)
 
     checks: Tuple[Tuple[Literal["key", "team"], List[str]], ...] = (
         ("key", key_models),
@@ -320,8 +320,8 @@ async def _check_summary_model_budget(
     except Exception:
         return True
 
-    model_max_budget = user_api_key_auth.model_max_budget
-    token = user_api_key_auth.token
+    model_max_budget = getattr(user_api_key_auth, "model_max_budget", None)
+    token = getattr(user_api_key_auth, "token", None)
     if isinstance(model_max_budget, dict) and model_max_budget and token is not None:
         try:
             await model_max_budget_limiter.is_key_within_model_budget(
@@ -338,8 +338,8 @@ async def _check_summary_model_budget(
             )
             return False
 
-    end_user_model_max_budget = user_api_key_auth.end_user_model_max_budget
-    end_user_id = user_api_key_auth.end_user_id
+    end_user_model_max_budget = getattr(user_api_key_auth, "end_user_model_max_budget", None)
+    end_user_id = getattr(user_api_key_auth, "end_user_id", None)
     if isinstance(end_user_model_max_budget, dict) and end_user_model_max_budget and end_user_id is not None:
         try:
             await model_max_budget_limiter.is_end_user_within_model_budget(
@@ -766,7 +766,7 @@ def _build_summary_messages(
             "building summary call; falling back to raw shape: %s",
             e,
         )
-        openai_messages = cast(Any, stripped)
+        openai_messages = stripped
 
     summary_messages: List[Dict[str, Any]] = []
     system_message = _system_to_openai_message(system)
@@ -805,6 +805,11 @@ def _append_text_to_content(content: Any, extra_text: str) -> Any:
     if isinstance(content, list):
         return [*content, {"type": "text", "text": extra_text}]
     return [content, {"type": "text", "text": extra_text}]
+
+
+class _OptionalSummaryCallKwargs(TypedDict, total=False):
+    user: str
+    allowed_model_region: str
 
 
 async def _call_summary_model(
@@ -848,7 +853,11 @@ async def _call_summary_model(
     # than from ``litellm_metadata``, so without it the summary tokens would not
     # debit the caller's end-user counters.
     raw_end_user_id = metadata.get("user_api_key_end_user_id")
-    end_user_id = raw_end_user_id if isinstance(raw_end_user_id, str) and raw_end_user_id else None
+    optional_kwargs: _OptionalSummaryCallKwargs = {}
+    if isinstance(raw_end_user_id, str) and raw_end_user_id:
+        optional_kwargs["user"] = raw_end_user_id
+    if allowed_model_region is not None:
+        optional_kwargs["allowed_model_region"] = allowed_model_region
     if llm_router is not None and hasattr(llm_router, "acompletion"):
         return await llm_router.acompletion(
             model=summary_model,
@@ -856,8 +865,7 @@ async def _call_summary_model(
             max_tokens=max_tokens,
             timeout=COMPACT_SUMMARY_TIMEOUT_SECONDS,
             litellm_metadata=metadata,
-            user=end_user_id,
-            allowed_model_region=allowed_model_region,
+            **optional_kwargs,
         )
     return await litellm.acompletion(
         model=summary_model,
@@ -865,8 +873,7 @@ async def _call_summary_model(
         max_tokens=max_tokens,
         timeout=COMPACT_SUMMARY_TIMEOUT_SECONDS,
         litellm_metadata=metadata,
-        user=end_user_id,
-        allowed_model_region=allowed_model_region,
+        **optional_kwargs,
     )
 
 

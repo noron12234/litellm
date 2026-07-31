@@ -10,7 +10,7 @@ MCP Spec Reference:
     https://modelcontextprotocol.io/specification/2025-11-25/client/sampling
 """
 
-from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
+from typing import Any, Dict, List, Literal, Optional, Tuple, TypedDict, Union
 import typing
 
 from starlette.types import Scope
@@ -519,7 +519,7 @@ def _convert_mcp_tools_to_openai(
         return None
     openai_tools: List["ChatCompletionToolParam"] = []
     for tool in tools:
-        openai_tool = {
+        openai_tool: "ChatCompletionToolParam" = {
             "type": "function",
             "function": {
                 "name": tool.name,
@@ -556,7 +556,7 @@ def _convert_mcp_tool_choice_to_openai(
 
 
 def _convert_openai_response_to_mcp_result(
-    response: Any,
+    response: "ModelResponse",
     model_name: str,
 ) -> Union["CreateMessageResult", "CreateMessageResultWithTools", "ErrorData"]:
     """
@@ -582,19 +582,19 @@ def _convert_openai_response_to_mcp_result(
     choice = response.choices[0]
     message = choice.message
     # Determine stop reason
-    finish_reason = getattr(choice, "finish_reason", "stop")
+    finish_reason = choice.finish_reason
     if finish_reason == "tool_calls":
         stop_reason = "toolUse"
     elif finish_reason == "length":
         stop_reason = "maxTokens"
     else:
         stop_reason = "endTurn"
-    actual_model = getattr(response, "model", model_name) or model_name
+    actual_model = response.model or model_name
     # Check if response has tool calls
-    tool_calls = getattr(message, "tool_calls", None)
+    tool_calls = message.tool_calls
     if tool_calls:
         # Build ToolUseContent items
-        content_parts: "List[Any]" = []
+        content_parts: List["SamplingMessageContentBlock"] = []
         # Include text content if present
         if message.content:
             content_parts.append(TextContent(type="text", text=message.content))
@@ -602,17 +602,15 @@ def _convert_openai_response_to_mcp_result(
         for tc in tool_calls:
             import json
 
-            tool_input = tc.function.arguments
-            if isinstance(tool_input, str):
-                try:
-                    tool_input = json.loads(tool_input)
-                except (json.JSONDecodeError, TypeError):
-                    tool_input = {"raw": tool_input}
+            try:
+                tool_input = json.loads(tc.function.arguments)
+            except (json.JSONDecodeError, TypeError):
+                tool_input = {"raw": tc.function.arguments}
             content_parts.append(
                 ToolUseContent(
                     type="tool_use",
                     id=tc.id,
-                    name=tc.function.name,
+                    name=tc.function.name or "",
                     input=tool_input,
                 )
             )
@@ -632,7 +630,7 @@ def _convert_openai_response_to_mcp_result(
     )
 
 
-async def _check_model_access(model: str, user_api_key_auth: Any) -> Optional["ErrorData"]:
+async def _check_model_access(model: str, user_api_key_auth: Optional["UserAPIKeyAuth"]) -> Optional["ErrorData"]:
     """Enforce model-permission checks for MCP sampling requests.
 
     Runs the same authorization checks as ``/chat/completions``:
@@ -645,9 +643,9 @@ async def _check_model_access(model: str, user_api_key_auth: Any) -> Optional["E
     if user_api_key_auth is None:
         return None
 
-    _api_key = getattr(user_api_key_auth, "api_key", None)
-    _token = getattr(user_api_key_auth, "token", None)
-    _user_role = getattr(user_api_key_auth, "user_role", None)
+    _api_key = user_api_key_auth.api_key
+    _token = user_api_key_auth.token
+    _user_role = user_api_key_auth.user_role
 
     _has_real_credential = bool(_api_key) or bool(_token)
     _is_admin = _user_role in ("proxy_admin", "proxy_admin_viewer") if _user_role else False
@@ -691,14 +689,14 @@ async def _check_model_access(model: str, user_api_key_auth: Any) -> Optional["E
 
         await can_key_call_model(
             model=model,
-            llm_model_list=getattr(litellm, "model_list", None),
+            llm_model_list=litellm.model_list,
             valid_token=user_api_key_auth,
             llm_router=_llm_router,
         )
 
-        _team_id = getattr(user_api_key_auth, "team_id", None)
-        _user_id = getattr(user_api_key_auth, "user_id", None)
-        _project_id = getattr(user_api_key_auth, "project_id", None)
+        _team_id = user_api_key_auth.team_id
+        _user_id = user_api_key_auth.user_id
+        _project_id = user_api_key_auth.project_id
 
         try:
             from litellm.proxy.proxy_server import (
@@ -727,7 +725,7 @@ async def _check_model_access(model: str, user_api_key_auth: Any) -> Optional["E
                     model=model,
                     team_object=team_obj,
                     llm_router=_llm_router,
-                    team_model_aliases=getattr(user_api_key_auth, "team_model_aliases", None),
+                    team_model_aliases=user_api_key_auth.team_model_aliases,
                 )
                 if _user_id and _proxy_logging_obj:
                     await _check_team_member_model_access(
@@ -795,7 +793,7 @@ async def _check_model_access(model: str, user_api_key_auth: Any) -> Optional["E
 
 async def _run_budget_checks(
     model: str,
-    user_api_key_auth: Any,
+    user_api_key_auth: "UserAPIKeyAuth",
     raw_headers: Optional[Dict[str, str]] = None,
     client_ip: Optional[str] = None,
 ) -> Optional["ErrorData"]:
@@ -824,8 +822,8 @@ async def _run_budget_checks(
         verbose_logger.warning("MCP sampling: budget check imports unavailable: %s", import_err)
         return None  # Can't enforce budgets without the modules
 
-    _team_id = getattr(user_api_key_auth, "team_id", None)
-    _user_id = getattr(user_api_key_auth, "user_id", None)
+    _team_id = user_api_key_auth.team_id
+    _user_id = user_api_key_auth.user_id
 
     team_obj = None
     if _team_id and _prisma_client and _user_api_key_cache:
@@ -931,7 +929,7 @@ async def _run_budget_checks(
 def _build_sampling_request(
     raw_headers: Optional[Dict[str, str]] = None,
     client_ip: Optional[str] = None,
-) -> Any:
+) -> "Request":
     """Build a synthetic FastAPI Request for sampling sub-calls.
 
     Converts the original MCP connection's HTTP headers into ASGI
@@ -954,10 +952,8 @@ def _build_sampling_request(
       original headers don't already carry it, as a fallback for
       IP attribution.
     """
-    from fastapi import Request
-
     # --- Build ASGI headers ---
-    _scope_headers: list = [(b"content-type", b"application/json")]
+    _scope_headers: List[Tuple[bytes, bytes]] = [(b"content-type", b"application/json")]
     # Hop-by-hop headers that must NOT be forwarded into the
     # synthetic request (they describe the original HTTP framing,
     # not the logical request).
@@ -1012,7 +1008,7 @@ def _build_sampling_request(
     if client_ip:
         _client_tuple = (client_ip, 0)
 
-    scope: Dict[str, Any] = {
+    scope: Scope = {
         "type": "http",
         "method": "POST",
         "path": "/mcp/sampling/createMessage",
@@ -1031,7 +1027,7 @@ def _build_sampling_request(
 async def _build_completion_kwargs(
     params: "CreateMessageRequestParams",
     model: str,
-    user_api_key_auth: Any,
+    user_api_key_auth: "UserAPIKeyAuth",
     raw_headers: Optional[Dict[str, str]],
     client_ip: Optional[str],
 ) -> Dict[str, Any]:
@@ -1061,7 +1057,7 @@ async def _build_completion_kwargs(
     from litellm.proxy.litellm_pre_call_utils import add_litellm_data_to_request
     from litellm.proxy.proxy_server import proxy_config
 
-    completion_kwargs["user"] = getattr(user_api_key_auth, "user_id", None)
+    completion_kwargs["user"] = user_api_key_auth.user_id
     _dummy_request = _build_sampling_request(raw_headers=raw_headers, client_ip=client_ip)
     completion_kwargs = await add_litellm_data_to_request(
         data=completion_kwargs,
@@ -1074,8 +1070,8 @@ async def _build_completion_kwargs(
 
 async def _run_guardrails_and_call_llm(
     completion_kwargs: Dict[str, Any],
-    user_api_key_auth: Any,
-) -> Any:
+    user_api_key_auth: "UserAPIKeyAuth",
+) -> "ModelResponse":
     try:
         from litellm.proxy.proxy_server import proxy_logging_obj as _plo
 
@@ -1100,17 +1096,22 @@ async def _run_guardrails_and_call_llm(
         from litellm.proxy.proxy_server import llm_router
 
         if llm_router is not None:
-            return await llm_router.acompletion(**completion_kwargs)
-        return await litellm.acompletion(**completion_kwargs)
+            result = await llm_router.acompletion(**completion_kwargs)
+        else:
+            result = await litellm.acompletion(**completion_kwargs)
     except ImportError:
-        return await litellm.acompletion(**completion_kwargs)
+        result = await litellm.acompletion(**completion_kwargs)
+
+    if not isinstance(result, litellm.ModelResponse):
+        raise TypeError(f"MCP sampling requires a non-streaming response, got {type(result).__name__}")
+    return result
 
 
 async def handle_sampling_create_message(
-    context: Any,
+    context: object,
     params: "CreateMessageRequestParams",
     default_model: Optional[str] = None,
-    user_api_key_auth: Optional[Any] = None,
+    user_api_key_auth: Optional["UserAPIKeyAuth"] = None,
     raw_headers: Optional[Dict[str, str]] = None,
     client_ip: Optional[str] = None,
 ) -> Union["CreateMessageResult", "CreateMessageResultWithTools", "ErrorData"]:

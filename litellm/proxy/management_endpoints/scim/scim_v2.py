@@ -201,10 +201,8 @@ class UserProvisionerHelpers:
         if not new_user_request.user_email:
             return None
 
-        existing_user = _to_domain_user(
-            await _table(UserRepository(prisma_client)).find_first(
-                where={"user_email": new_user_request.user_email}
-            )
+        existing_user = await _table(UserRepository(prisma_client)).find_first(
+            where={"user_email": new_user_request.user_email}
         )
 
         if not existing_user:
@@ -285,11 +283,11 @@ async def _get_prisma_client_or_raise_exception():
     return prisma_client
 
 
-async def _check_user_exists(user_id: str) -> LiteLLM_UserTable:
+async def _check_user_exists(user_id: str) -> "PrismaUserTable":
     """Check if user exists and return user, raise 404 if not found."""
     prisma_client = await _get_prisma_client_or_raise_exception()
 
-    user = _to_domain_user(await _table(UserRepository(prisma_client)).find_unique(where={"user_id": user_id}))
+    user = await _table(UserRepository(prisma_client)).find_unique(where={"user_id": user_id})
 
     if not user:
         raise HTTPException(status_code=404, detail={"error": f"User not found with ID: {user_id}"})
@@ -297,11 +295,11 @@ async def _check_user_exists(user_id: str) -> LiteLLM_UserTable:
     return user
 
 
-async def _check_team_exists(team_id: str) -> LiteLLM_TeamTable:
+async def _check_team_exists(team_id: str) -> "PrismaTeamTable":
     """Check if team exists and return team, raise 404 if not found."""
     prisma_client = await _get_prisma_client_or_raise_exception()
 
-    team = _to_domain_team(await _table(TeamRepository(prisma_client)).find_unique(where={"team_id": team_id}))
+    team = await _table(TeamRepository(prisma_client)).find_unique(where={"team_id": team_id})
 
     if not team:
         raise HTTPException(status_code=404, detail={"error": f"Group not found with ID: {team_id}"})
@@ -453,8 +451,7 @@ async def _scim_groups_from_team_ids(prisma_client: PrismaClient, team_ids: list
     does on PUT (where SCIM groups carry display names natively).
     """
     teams = [
-        _to_domain_team(await _table(TeamRepository(prisma_client)).find_unique(where={"team_id": team_id}))
-        for team_id in team_ids
+        await _table(TeamRepository(prisma_client)).find_unique(where={"team_id": team_id}) for team_id in team_ids
     ]
     return [
         SCIMUserGroup(
@@ -478,7 +475,7 @@ async def _recompute_scim_member_roles(prisma_client: PrismaClient, user_ids: It
 
     default_role = _default_scim_user_role()
     for user_id in user_ids:
-        user = _to_domain_user(await _table(UserRepository(prisma_client)).find_unique(where={"user_id": user_id}))
+        user = await _table(UserRepository(prisma_client)).find_unique(where={"user_id": user_id})
         if user is None:
             continue
         resolved_role = _resolve_scim_user_role(
@@ -805,7 +802,8 @@ async def _set_user_keys_blocked(user_id: str, blocked: bool) -> int:
         return 0
 
     for key_row in affected_keys:
-        current_metadata: Dict[str, object] = dict(_json_object_fields(key_row.metadata) or {})
+        key_row_fields = _json_object_fields(key_row.metadata)
+        current_metadata: Dict[str, object] = dict(key_row_fields) if key_row_fields is not None else {}
         if blocked:
             new_metadata = {**current_metadata, SCIM_BLOCKED_METADATA_KEY: True}
         else:
@@ -1418,7 +1416,7 @@ async def get_user(
         user = await _check_user_exists(user_id)
 
         # Convert to SCIM format
-        scim_user = await ScimTransformations.transform_litellm_user_to_scim_user(user)
+        scim_user = await ScimTransformations.transform_litellm_user_to_scim_user(_to_domain_user(user))
         return scim_user
 
     except Exception as e:
@@ -1809,8 +1807,8 @@ def _apply_patch_ops(
 ) -> Tuple[Dict[str, object], Set[str]]:
     """Apply patch operations and return update data and final team set."""
     update_data: Dict[str, object] = {}
-    metadata: Dict[str, object] = dict(existing_user.metadata or {})
-    scim_metadata: Dict[str, object] = dict(_json_object_fields(metadata.get("scim_metadata")) or {})
+    metadata = existing_user.metadata or {}
+    scim_metadata = metadata.get("scim_metadata", {})
 
     teams_set: Set[str] = set(existing_user.teams or [])
     replace_team_set: Optional[Set[str]] = None
@@ -1821,9 +1819,9 @@ def _apply_patch_ops(
         op_type = op.op
 
         # Handle SCIM operations without path where value contains the fields
-        if not path and isinstance(value, dict):
-            fields = _json_object_fields(value)
-            for key, val in (fields or {}).items():
+        fields = _json_object_fields(value) if not path else None
+        if fields is not None:
+            for key, val in fields.items():
                 key_lower = key.lower()
                 if key_lower == "active":
                     _handle_active_update(op_type, val, metadata)
@@ -1962,7 +1960,7 @@ async def patch_user(
         prev_active = _scim_active_value(existing_user.metadata)
 
         update_data, final_team_set = _apply_patch_ops(
-            existing_user=existing_user,
+            existing_user=_to_domain_user(existing_user),
             patch_ops=patch_ops,
         )
 
@@ -2063,7 +2061,7 @@ async def get_groups(
             # list to the IdP and trigger repeated re-provisioning.
             members = await _get_team_members_display(await _get_team_member_user_ids_from_team(team))
             verbose_proxy_logger.debug(f"SCIM GET GROUPS members: {members}")
-            team_alias = team.team_alias
+            team_alias = team.team_alias or team.team_id
             team_created_at = team.created_at.isoformat() if team.created_at else None
             team_updated_at = team.updated_at.isoformat() if team.updated_at else None
 
@@ -2108,7 +2106,7 @@ async def get_group(
     try:
         team = await _check_team_exists(group_id)
 
-        scim_group = await ScimTransformations.transform_litellm_team_to_scim_group(team)
+        scim_group = await ScimTransformations.transform_litellm_team_to_scim_group(_to_domain_team(team))
         verbose_proxy_logger.debug(f"SCIM GET GROUP response: {scim_group}")
         return scim_group
 
@@ -2199,9 +2197,8 @@ async def update_group(
         verbose_proxy_logger.debug(f"SCIM PUT GROUP created_users: {len(member_result.created_users)}")
 
         # Prepare update data
-        existing_metadata = existing_team.metadata if existing_team.metadata else {}
-        updated_metadata = {
-            **existing_metadata,
+        updated_metadata: Dict[str, object] = {
+            **(_json_object_fields(existing_team.metadata) or {}),
             SCIM_TEAM_DATA_METADATA_KEY: group.model_dump(),
             SCIM_MANAGED_TEAM_METADATA_KEY: True,
         }
@@ -2220,7 +2217,7 @@ async def update_group(
         )
 
         # Handle user-team relationship changes
-        current_members = set(await _get_team_member_user_ids_from_team(existing_team))
+        current_members = set(await _get_team_member_user_ids_from_team(_to_domain_team(existing_team)))
         verbose_proxy_logger.debug(f"SCIM PUT GROUP current_members: {current_members}")
         final_members = set(member_result.all_member_ids)
         verbose_proxy_logger.debug(f"SCIM PUT GROUP final_members: {final_members}")
@@ -2264,7 +2261,7 @@ async def delete_group(
         prisma_client = await _get_prisma_client_or_raise_exception()
         existing_team = await _check_team_exists(group_id)
 
-        member_ids = await _get_team_member_user_ids_from_team(existing_team)
+        member_ids = await _get_team_member_user_ids_from_team(_to_domain_team(existing_team))
 
         # For each member, remove this team from their teams list
         for member_id in member_ids:
@@ -2443,7 +2440,7 @@ async def patch_group(
 
     try:
         prisma_client = await _get_prisma_client_or_raise_exception()
-        existing_team = await _check_team_exists(group_id)
+        existing_team = _to_domain_team(await _check_team_exists(group_id))
 
         # Process patch operations
         update_data, final_members, replace_target = await _process_group_patch_operations(
