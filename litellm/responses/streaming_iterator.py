@@ -1403,10 +1403,8 @@ class ResponsesWebSocketStreaming:
         try:
             if isinstance(message, str):
                 msg_obj = json.loads(message)
-            elif isinstance(message, dict):
-                msg_obj = message
             else:
-                return
+                msg_obj = message
 
             if msg_obj.get("type") != "response.create":
                 return

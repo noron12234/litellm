@@ -131,12 +131,14 @@ class CustomStreamWrapper:
         self,
         completion_stream,
         model,
-        logging_obj: LiteLLMLoggingObject,
+        logging_obj: Optional[LiteLLMLoggingObject],
         custom_llm_provider: Optional[str] = None,
         stream_options=None,
         make_call: Optional[Callable] = None,
         _response_headers: Optional[dict] = None,
     ):
+        if logging_obj is None:
+            raise ValueError("CustomStreamWrapper requires a logging_obj")
         self.model = model
         self.make_call = make_call
         self.custom_llm_provider = custom_llm_provider
@@ -265,9 +267,8 @@ class CustomStreamWrapper:
             is_function_call,
         )
 
-        if hasattr(logging_obj, "optional_params") and isinstance(logging_obj.optional_params, dict):
-            if is_function_call(logging_obj.optional_params):
-                return True
+        if hasattr(logging_obj, "optional_params"):
+            return is_function_call(logging_obj.optional_params)
 
         return False
 

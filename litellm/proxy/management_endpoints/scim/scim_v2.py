@@ -262,7 +262,7 @@ class UserProvisionerHelpers:
             },
         )
 
-        return await ScimTransformations.transform_litellm_user_to_scim_user(updated_user)
+        return await ScimTransformations.transform_litellm_user_to_scim_user(_to_domain_user(updated_user))
 
 
 class ScimUserData(TypedDict):
