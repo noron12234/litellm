@@ -10,15 +10,20 @@ MCP Spec Reference:
     https://modelcontextprotocol.io/specification/2025-11-25/client/sampling
 """
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, TypedDict, Union
 import typing
+
+from starlette.types import Scope
 
 if typing.TYPE_CHECKING:
     from litellm.proxy.utils import ProxyLogging
+    from litellm.proxy._types import UserAPIKeyAuth
+    from litellm.types.llms.openai import ChatCompletionToolParam
+    from litellm.types.utils import ModelResponse
 
 from litellm._logging import verbose_logger
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 # Guard imports that require the mcp package
 try:
@@ -29,11 +34,14 @@ try:
         ErrorData,
         ModelPreferences,
         SamplingMessage,
+        SamplingMessageContentBlock,
         TextContent,
         Tool,
         ToolChoice,
         ToolUseContent,
     )
+
+    MCPSamplingContent = Union[SamplingMessageContentBlock, List[SamplingMessageContentBlock]]
 
     MCP_SAMPLING_AVAILABLE = True
 except ImportError as _sampling_import_err:
@@ -65,7 +73,7 @@ def _resolve_model_from_preferences(
     import litellm
 
     # Build list of available model names from proxy Router or litellm.model_list
-    available_model_names: list = []
+    available_model_names: List[str] = []
     try:
         from litellm.proxy.proxy_server import llm_router
 
@@ -83,7 +91,7 @@ def _resolve_model_from_preferences(
                 available_model_names.append(entry)
     if model_preferences and model_preferences.hints:
         for hint in model_preferences.hints:
-            hint_name = getattr(hint, "name", None)
+            hint_name = hint.name
             if not hint_name:
                 continue
             # Try direct match first
@@ -104,7 +112,7 @@ def _resolve_model_from_preferences(
                     return model_name
         verbose_logger.debug(
             "MCP sampling model resolution: no hint matched from %s against %d available models",
-            [getattr(h, "name", None) for h in model_preferences.hints],
+            [h.name for h in model_preferences.hints],
             len(available_model_names),
         )
 
@@ -153,6 +161,13 @@ def _has_priorities(model_preferences: "ModelPreferences") -> bool:
     )
 
 
+class _ScoredModel(TypedDict):
+    name: str
+    cost: float
+    max_output: float
+    output_tps: float
+
+
 def _select_model_by_priority(
     model_names: List[str],
     model_preferences: "ModelPreferences",
@@ -188,7 +203,7 @@ def _select_model_by_priority(
     intel_weight = getattr(model_preferences, "intelligencePriority", None) or 0.0
 
     # Gather raw metrics for each model
-    scored: List[Dict[str, Any]] = []
+    scored: List[_ScoredModel] = []
     for name in model_names:
         try:
             info = _litellm.get_model_info(name)
@@ -257,7 +272,7 @@ def _select_model_by_priority(
 
 
 def _convert_mcp_content_to_openai(
-    content: Any,
+    content: "MCPSamplingContent",
 ) -> Union[str, Dict[str, Any], List[Dict[str, Any]]]:
     """
     Convert MCP SamplingMessage content to OpenAI message content format.
@@ -282,7 +297,7 @@ def _convert_mcp_content_to_openai(
 
 
 def _convert_single_content(
-    content: Any,
+    content: "SamplingMessageContentBlock",
 ) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     """Convert a single MCP content item to OpenAI format.
 
@@ -294,19 +309,14 @@ def _convert_single_content(
     """
     import json
 
-    content_type = getattr(content, "type", None)
-    if content_type == "text":
+    if content.type == "text":
         return {"type": "text", "text": content.text}
-    elif content_type == "image":
-        data = getattr(content, "data", "")
-        mime_type = getattr(content, "mimeType", "image/png")
+    elif content.type == "image":
         return {
             "type": "image_url",
-            "image_url": {"url": f"data:{mime_type};base64,{data}"},
+            "image_url": {"url": f"data:{content.mimeType};base64,{content.data}"},
         }
-    elif content_type == "audio":
-        data = getattr(content, "data", "")
-        mime_type = getattr(content, "mimeType", "audio/wav")
+    elif content.type == "audio":
         # Map MIME type to OpenAI audio format
         format_map = {
             "audio/wav": "wav",
@@ -315,40 +325,35 @@ def _convert_single_content(
             "audio/flac": "flac",
             "audio/ogg": "ogg",
         }
-        audio_format = format_map.get(mime_type, "wav")
+        audio_format = format_map.get(content.mimeType, "wav")
         return {
             "type": "input_audio",
-            "input_audio": {"data": data, "format": audio_format},
+            "input_audio": {"data": content.data, "format": audio_format},
         }
-    elif content_type == "tool_use":
+    elif content.type == "tool_use":
         # ToolUseContent → proper OpenAI function-call representation.
         # The ``_marker_type`` key lets the message-level converter
         # hoist this into the ``tool_calls`` array on the assistant
         # message instead of embedding it inline as a content part.
         return {
             "_marker_type": "tool_use",
-            "id": getattr(content, "id", f"call_{id(content)}"),
+            "id": content.id,
             "type": "function",
             "function": {
-                "name": getattr(content, "name", ""),
-                "arguments": json.dumps(getattr(content, "input", {}), default=str),
+                "name": content.name,
+                "arguments": json.dumps(content.input, default=str),
             },
         }
-    elif content_type == "tool_result":
+    elif content.type == "tool_result":
         # ToolResultContent → proper OpenAI tool-role message.
         # Marked so the message-level converter can emit it as a
         # separate ``{"role": "tool", ...}`` message.
-        tool_use_id = getattr(content, "toolUseId", "")
-        nested_content = getattr(content, "content", [])
-        if isinstance(nested_content, list):
-            text_parts = [getattr(c, "text", str(c)) for c in nested_content if getattr(c, "type", None) == "text"]
-            result_text = "\n".join(text_parts) if text_parts else ""
-        else:
-            result_text = str(nested_content)
+        text_parts = [c.text for c in content.content if c.type == "text"]
+        result_text = "\n".join(text_parts) if text_parts else ""
         return {
             "_marker_type": "tool_result",
             "role": "tool",
-            "tool_call_id": tool_use_id,
+            "tool_call_id": content.toolUseId,
             "content": result_text,
         }
     # Fallback: treat as text
@@ -442,69 +447,60 @@ def _convert_mcp_messages_to_openai(
     return openai_messages
 
 
-def _has_tool_use(content: Any) -> bool:
+def _has_tool_use(content: "MCPSamplingContent") -> bool:
     """Check if content contains ToolUseContent."""
     if isinstance(content, list):
-        return any(getattr(c, "type", None) == "tool_use" for c in content)
-    return getattr(content, "type", None) == "tool_use"
+        return any(c.type == "tool_use" for c in content)
+    return content.type == "tool_use"
 
 
-def _has_tool_result(content: Any) -> bool:
+def _has_tool_result(content: "MCPSamplingContent") -> bool:
     """Check if content contains ToolResultContent."""
     if isinstance(content, list):
-        return any(getattr(c, "type", None) == "tool_result" for c in content)
-    return getattr(content, "type", None) == "tool_result"
+        return any(c.type == "tool_result" for c in content)
+    return content.type == "tool_result"
 
 
-def _extract_tool_calls(content: Any) -> List[Dict[str, Any]]:
+def _extract_tool_calls(content: "MCPSamplingContent") -> List[Dict[str, Any]]:
     """Extract OpenAI-format tool_calls from MCP ToolUseContent."""
     import json
 
     items = content if isinstance(content, list) else [content]
     tool_calls = []
     for item in items:
-        if getattr(item, "type", None) == "tool_use":
+        if item.type == "tool_use":
             tool_calls.append(
                 {
-                    "id": getattr(item, "id", f"call_{id(item)}"),
+                    "id": item.id,
                     "type": "function",
                     "function": {
-                        "name": getattr(item, "name", ""),
-                        "arguments": json.dumps(getattr(item, "input", {}), default=str),
+                        "name": item.name,
+                        "arguments": json.dumps(item.input, default=str),
                     },
                 }
             )
     return tool_calls
 
 
-def _extract_text_parts(content: Any) -> Optional[str]:
+def _extract_text_parts(content: "MCPSamplingContent") -> Optional[str]:
     """Extract text parts from mixed content."""
     items = content if isinstance(content, list) else [content]
-    texts = []
-    for item in items:
-        if getattr(item, "type", None) == "text":
-            texts.append(getattr(item, "text", ""))
+    texts = [item.text for item in items if item.type == "text"]
     return "\n".join(texts) if texts else None
 
 
-def _extract_tool_results(content: Any) -> List[Dict[str, Any]]:
+def _extract_tool_results(content: "MCPSamplingContent") -> List[Dict[str, Any]]:
     """Extract OpenAI-format tool messages from MCP ToolResultContent."""
     items = content if isinstance(content, list) else [content]
     results = []
     for item in items:
-        if getattr(item, "type", None) == "tool_result":
-            tool_use_id = getattr(item, "toolUseId", "")
-            # Extract text from nested content
-            nested_content = getattr(item, "content", [])
-            if isinstance(nested_content, list):
-                text_parts = [getattr(c, "text", str(c)) for c in nested_content if getattr(c, "type", None) == "text"]
-                result_text = "\n".join(text_parts) if text_parts else ""
-            else:
-                result_text = str(nested_content)
+        if item.type == "tool_result":
+            text_parts = [c.text for c in item.content if c.type == "text"]
+            result_text = "\n".join(text_parts) if text_parts else ""
             results.append(
                 {
                     "role": "tool",
-                    "tool_call_id": tool_use_id,
+                    "tool_call_id": item.toolUseId,
                     "content": result_text,
                 }
             )
@@ -513,7 +509,7 @@ def _extract_tool_results(content: Any) -> List[Dict[str, Any]]:
 
 def _convert_mcp_tools_to_openai(
     tools: Optional[List["Tool"]],
-) -> Optional[List[Dict[str, Any]]]:
+) -> Optional[List["ChatCompletionToolParam"]]:
     """
     Convert MCP Tool definitions to OpenAI function calling format.
     MCP Tool: {name, description, inputSchema}
@@ -521,7 +517,7 @@ def _convert_mcp_tools_to_openai(
     """
     if not tools:
         return None
-    openai_tools = []
+    openai_tools: List["ChatCompletionToolParam"] = []
     for tool in tools:
         openai_tool = {
             "type": "function",
@@ -541,7 +537,7 @@ def _convert_mcp_tools_to_openai(
 
 def _convert_mcp_tool_choice_to_openai(
     tool_choice: Optional["ToolChoice"],
-) -> Optional[Union[str, Dict[str, Any]]]:
+) -> Optional[Literal["auto", "required", "none"]]:
     """
     Convert MCP ToolChoice to OpenAI tool_choice format.
     MCP: {mode: "auto"} | {mode: "required"} | {mode: "none"}
@@ -549,7 +545,7 @@ def _convert_mcp_tool_choice_to_openai(
     """
     if not tool_choice:
         return None
-    mode = getattr(tool_choice, "mode", "auto")
+    mode = tool_choice.mode or "auto"
     if mode == "auto":
         return "auto"
     elif mode == "required":

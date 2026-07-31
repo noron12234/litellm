@@ -13,7 +13,7 @@ Mirrors Anthropic's native ``compact_20260112`` for non-Anthropic providers:
 """
 
 import re
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple, Union, cast
 
 import litellm
 from litellm._logging import verbose_logger
@@ -22,6 +22,7 @@ from litellm.types.llms.anthropic import (
     CompactionBlock,
     UsageIteration,
 )
+from litellm.types.llms.openai import ChatCompletionToolParam
 
 from ..constants import (
     COMPACT_DEFAULT_INSTRUCTIONS,
@@ -37,6 +38,10 @@ from ..constants import (
 )
 from ..errors import AnthropicContextManagementError
 from ..result import PolyfillResult
+
+if TYPE_CHECKING:
+    from litellm.proxy._types import UserAPIKeyAuth
+    from litellm.router import Router
 
 # Auth metadata fields propagated from the parent request to the summary call
 # so the summary's spend is attributed to the same scopes. The list mirrors the
@@ -98,9 +103,9 @@ def _read_summary_max_tokens_setting() -> int:
 
 
 async def _check_summary_model_access(
-    user_api_key_auth: Any,
+    user_api_key_auth: Optional["UserAPIKeyAuth"],
     summary_model: str,
-    llm_router: Any,
+    llm_router: Optional["Router"],
 ) -> bool:
     """Return True when every model-allowlist scope on the parent request is
     satisfied for ``summary_model``.
@@ -143,12 +148,12 @@ async def _check_summary_model_access(
     except Exception:
         return True
 
-    key_models = list(getattr(user_api_key_auth, "models", None) or [])
-    team_id = getattr(user_api_key_auth, "team_id", None)
-    team_model_aliases = getattr(user_api_key_auth, "team_model_aliases", None)
-    team_models = list(getattr(user_api_key_auth, "team_models", None) or [])
-    user_id = getattr(user_api_key_auth, "user_id", None)
-    project_id = getattr(user_api_key_auth, "project_id", None)
+    key_models = list(user_api_key_auth.models or [])
+    team_id = user_api_key_auth.team_id
+    team_model_aliases = user_api_key_auth.team_model_aliases
+    team_models = list(user_api_key_auth.team_models or [])
+    user_id = user_api_key_auth.user_id
+    project_id = user_api_key_auth.project_id
 
     checks: Tuple[Tuple[Literal["key", "team"], List[str]], ...] = (
         ("key", key_models),
@@ -294,7 +299,7 @@ async def _check_summary_model_access(
 
 
 async def _check_summary_model_budget(
-    user_api_key_auth: Any,
+    user_api_key_auth: Optional["UserAPIKeyAuth"],
     summary_model: str,
 ) -> bool:
     """Return True when the caller is within their per-model budget for
@@ -315,8 +320,8 @@ async def _check_summary_model_budget(
     except Exception:
         return True
 
-    model_max_budget = getattr(user_api_key_auth, "model_max_budget", None)
-    token = getattr(user_api_key_auth, "token", None)
+    model_max_budget = user_api_key_auth.model_max_budget
+    token = user_api_key_auth.token
     if isinstance(model_max_budget, dict) and model_max_budget and token is not None:
         try:
             await model_max_budget_limiter.is_key_within_model_budget(
@@ -333,8 +338,8 @@ async def _check_summary_model_budget(
             )
             return False
 
-    end_user_model_max_budget = getattr(user_api_key_auth, "end_user_model_max_budget", None)
-    end_user_id = getattr(user_api_key_auth, "end_user_id", None)
+    end_user_model_max_budget = user_api_key_auth.end_user_model_max_budget
+    end_user_id = user_api_key_auth.end_user_id
     if isinstance(end_user_model_max_budget, dict) and end_user_model_max_budget and end_user_id is not None:
         try:
             await model_max_budget_limiter.is_end_user_within_model_budget(
@@ -357,7 +362,7 @@ async def _check_summary_model_budget(
 
 
 async def _check_summary_model_rate_limit(
-    user_api_key_auth: Any,
+    user_api_key_auth: Optional["UserAPIKeyAuth"],
     summary_model: str,
 ) -> bool:
     """Return True when the caller is within their configured RPM/TPM limits
@@ -616,18 +621,18 @@ def _count_effective_tokens(
             "count, falling back to raw messages: %s",
             e,
         )
-        openai_shape = cast(Any, messages_without_compaction)
+        openai_shape = messages_without_compaction
 
     # Translate Anthropic-shaped tools (``input_schema``) to OpenAI-shaped
     # tools (``{"type": "function", "function": {...}}``) so ``token_counter``
     # gets a consistent format regardless of which counting path it uses.
     # An inaccurate tool token count here could cause the polyfill to skip
     # needed compaction or trigger unnecessary summarization.
-    openai_tools: Optional[List[Dict[str, Any]]] = None
+    openai_tools: Optional[Union[List[ChatCompletionToolParam], List[Dict[str, Any]]]] = None
     if tools:
         try:
             translated_tools, _ = adapter.translate_anthropic_tools_to_openai(tools=cast(Any, tools))
-            openai_tools = cast(List[Dict[str, Any]], translated_tools)
+            openai_tools = translated_tools
         except Exception as e:
             verbose_logger.debug(
                 "compact_20260112: anthropic→openai tools translation failed "
@@ -638,7 +643,7 @@ def _count_effective_tokens(
 
     total = litellm.token_counter(
         model=model,
-        messages=cast(Any, openai_shape),
+        messages=openai_shape,
         tools=cast(Any, openai_tools),
     )
     if compaction_block is not None:
@@ -838,25 +843,31 @@ async def _call_summary_model(
     # the parent ``/v1/messages`` request. On timeout the caller catches the
     # exception and surfaces ``applied_edits[0].error = "summary_call_failed"``,
     # forwarding the request without compaction rather than hanging.
-    call_kwargs: Dict[str, Any] = {
-        "model": summary_model,
-        "messages": summary_messages,
-        "max_tokens": max_tokens,
-        "timeout": COMPACT_SUMMARY_TIMEOUT_SECONDS,
-        "litellm_metadata": metadata,
-    }
     # The end-user id must also travel as the top-level ``user`` kwarg: legacy
     # limiter hooks and prometheus end-user tracking read it from there rather
     # than from ``litellm_metadata``, so without it the summary tokens would not
     # debit the caller's end-user counters.
-    end_user_id = metadata.get("user_api_key_end_user_id")
-    if end_user_id:
-        call_kwargs["user"] = end_user_id
-    if allowed_model_region is not None:
-        call_kwargs["allowed_model_region"] = allowed_model_region
+    raw_end_user_id = metadata.get("user_api_key_end_user_id")
+    end_user_id = raw_end_user_id if isinstance(raw_end_user_id, str) and raw_end_user_id else None
     if llm_router is not None and hasattr(llm_router, "acompletion"):
-        return await llm_router.acompletion(**call_kwargs)
-    return await litellm.acompletion(**call_kwargs)
+        return await llm_router.acompletion(
+            model=summary_model,
+            messages=summary_messages,
+            max_tokens=max_tokens,
+            timeout=COMPACT_SUMMARY_TIMEOUT_SECONDS,
+            litellm_metadata=metadata,
+            user=end_user_id,
+            allowed_model_region=allowed_model_region,
+        )
+    return await litellm.acompletion(
+        model=summary_model,
+        messages=summary_messages,
+        max_tokens=max_tokens,
+        timeout=COMPACT_SUMMARY_TIMEOUT_SECONDS,
+        litellm_metadata=metadata,
+        user=end_user_id,
+        allowed_model_region=allowed_model_region,
+    )
 
 
 def _extract_response_text(response: Any) -> Optional[str]:
@@ -941,8 +952,8 @@ async def apply_compact_20260112(
     system: Optional[Union[str, List[Dict[str, Any]]]],
     edit_spec: Dict[str, Any],
     litellm_metadata: Optional[Dict[str, Any]] = None,
-    llm_router: Any = None,
-    user_api_key_auth: Any = None,
+    llm_router: Optional["Router"] = None,
+    user_api_key_auth: Optional["UserAPIKeyAuth"] = None,
 ) -> PolyfillResult:
     """Apply ``compact_20260112``; return a ``PolyfillResult``.
 
