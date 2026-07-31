@@ -91,7 +91,7 @@ def _resolve_model_from_preferences(
                 available_model_names.append(entry)
     if model_preferences and model_preferences.hints:
         for hint in model_preferences.hints:
-            hint_name = hint.name
+            hint_name = getattr(hint, "name", None)
             if not hint_name:
                 continue
             # Try direct match first
@@ -112,7 +112,7 @@ def _resolve_model_from_preferences(
                     return model_name
         verbose_logger.debug(
             "MCP sampling model resolution: no hint matched from %s against %d available models",
-            [h.name for h in model_preferences.hints],
+            [getattr(h, "name", None) for h in model_preferences.hints],
             len(available_model_names),
         )
 
@@ -1071,7 +1071,7 @@ async def _build_completion_kwargs(
 async def _run_guardrails_and_call_llm(
     completion_kwargs: Dict[str, Any],
     user_api_key_auth: "UserAPIKeyAuth",
-) -> "ModelResponse":
+) -> Any:
     try:
         from litellm.proxy.proxy_server import proxy_logging_obj as _plo
 
@@ -1096,15 +1096,10 @@ async def _run_guardrails_and_call_llm(
         from litellm.proxy.proxy_server import llm_router
 
         if llm_router is not None:
-            result = await llm_router.acompletion(**completion_kwargs)
-        else:
-            result = await litellm.acompletion(**completion_kwargs)
+            return await llm_router.acompletion(**completion_kwargs)
+        return await litellm.acompletion(**completion_kwargs)
     except ImportError:
-        result = await litellm.acompletion(**completion_kwargs)
-
-    if not isinstance(result, litellm.ModelResponse):
-        raise TypeError(f"MCP sampling requires a non-streaming response, got {type(result).__name__}")
-    return result
+        return await litellm.acompletion(**completion_kwargs)
 
 
 async def handle_sampling_create_message(
