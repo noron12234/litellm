@@ -8193,6 +8193,28 @@ class ProxyStartupEvent:
 
         await cls._initialize_spend_tracking_background_jobs(scheduler=scheduler)
 
+        ### PTU DAILY ROLLUP ###
+        from litellm.proxy.spend_tracking.ptu_flat_cost_rollup import (
+            PTU_ROLLUP_JOB_ID,
+            run_ptu_flat_cost_rollup,
+        )
+
+        async def _scheduled_ptu_rollup() -> None:
+            await run_ptu_flat_cost_rollup(prisma_client)
+
+        scheduler.add_job(
+            _scheduled_ptu_rollup,
+            "cron",
+            hour=0,
+            minute=15,
+            id=PTU_ROLLUP_JOB_ID,
+            replace_existing=True,
+            misfire_grace_time=APSCHEDULER_MISFIRE_GRACE_TIME,
+        )
+        verbose_proxy_logger.info(
+            "PTU rollup job scheduled at 00:15 UTC daily (only models with PTU config accrue flat cost)"
+        )
+
         ### SPEND LOG CLEANUP ###
         if general_settings.get("maximum_spend_logs_retention_period") is not None:
             spend_log_cleanup = SpendLogCleanup()
