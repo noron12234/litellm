@@ -48,6 +48,10 @@ class ResetBudgetJob:
         self.proxy_logging_obj: ProxyLogging = proxy_logging_obj
         self.prisma_client: PrismaClient = prisma_client
         self.reset_settings: BudgetResetSettings = reset_settings or get_budget_reset_settings()
+        # The event loop only keeps weak references to tasks, so a service-log
+        # task whose only reference was the create_task() call can be collected
+        # before it reports. Hold it until it completes.
+        self._service_logging_tasks: set[asyncio.Task] = set()  # mutable-ok: task registry
 
     async def reset_budget(
         self,
@@ -328,7 +332,7 @@ class ResetBudgetJob:
                     f"Failed to reset {len(failed_endusers)} endusers: {json.dumps(failed_endusers, default=str)}"
                 )
 
-            asyncio.create_task(
+            _service_logging_task = asyncio.create_task(
                 self.proxy_logging_obj.service_logging_obj.async_service_success_hook(
                     service=ServiceTypes.RESET_BUDGET_JOB,
                     duration=end_time - start_time,
@@ -347,9 +351,11 @@ class ResetBudgetJob:
                     },
                 )
             )
+            self._service_logging_tasks.add(_service_logging_task)
+            _service_logging_task.add_done_callback(self._service_logging_tasks.discard)
         except Exception as e:
             end_time = time.time()
-            asyncio.create_task(
+            _service_logging_task = asyncio.create_task(
                 self.proxy_logging_obj.service_logging_obj.async_service_failure_hook(
                     service=ServiceTypes.RESET_BUDGET_JOB,
                     duration=end_time - start_time,
@@ -365,6 +371,8 @@ class ResetBudgetJob:
                     },
                 )
             )
+            self._service_logging_tasks.add(_service_logging_task)
+            _service_logging_task.add_done_callback(self._service_logging_tasks.discard)
             verbose_proxy_logger.exception("Failed to reset budget for endusers: %s", e)
 
     async def _get_endusers_with_no_budget_id(
@@ -489,7 +497,7 @@ class ResetBudgetJob:
             if len(failed_keys) > 0:  # If any keys failed to reset
                 raise Exception(f"Failed to reset {len(failed_keys)} keys: {json.dumps(failed_keys, default=str)}")
 
-            asyncio.create_task(
+            _service_logging_task = asyncio.create_task(
                 self.proxy_logging_obj.service_logging_obj.async_service_success_hook(
                     service=ServiceTypes.RESET_BUDGET_JOB,
                     duration=end_time - start_time,
@@ -506,9 +514,11 @@ class ResetBudgetJob:
                     },
                 )
             )
+            self._service_logging_tasks.add(_service_logging_task)
+            _service_logging_task.add_done_callback(self._service_logging_tasks.discard)
         except Exception as e:
             end_time = time.time()
-            asyncio.create_task(
+            _service_logging_task = asyncio.create_task(
                 self.proxy_logging_obj.service_logging_obj.async_service_failure_hook(
                     service=ServiceTypes.RESET_BUDGET_JOB,
                     duration=end_time - start_time,
@@ -522,6 +532,8 @@ class ResetBudgetJob:
                     },
                 )
             )
+            self._service_logging_tasks.add(_service_logging_task)
+            _service_logging_task.add_done_callback(self._service_logging_tasks.discard)
             verbose_proxy_logger.exception("Failed to reset budget for keys: %s", e)
 
     async def reset_budget_for_litellm_users(self):
@@ -570,7 +582,7 @@ class ResetBudgetJob:
             if len(failed_users) > 0:  # If any users failed to reset
                 raise Exception(f"Failed to reset {len(failed_users)} users: {json.dumps(failed_users, default=str)}")
 
-            asyncio.create_task(
+            _service_logging_task = asyncio.create_task(
                 self.proxy_logging_obj.service_logging_obj.async_service_success_hook(
                     service=ServiceTypes.RESET_BUDGET_JOB,
                     duration=end_time - start_time,
@@ -587,9 +599,11 @@ class ResetBudgetJob:
                     },
                 )
             )
+            self._service_logging_tasks.add(_service_logging_task)
+            _service_logging_task.add_done_callback(self._service_logging_tasks.discard)
         except Exception as e:
             end_time = time.time()
-            asyncio.create_task(
+            _service_logging_task = asyncio.create_task(
                 self.proxy_logging_obj.service_logging_obj.async_service_failure_hook(
                     service=ServiceTypes.RESET_BUDGET_JOB,
                     duration=end_time - start_time,
@@ -603,6 +617,8 @@ class ResetBudgetJob:
                     },
                 )
             )
+            self._service_logging_tasks.add(_service_logging_task)
+            _service_logging_task.add_done_callback(self._service_logging_tasks.discard)
             verbose_proxy_logger.exception("Failed to reset budget for users: %s", e)
 
     async def reset_budget_for_litellm_teams(self):
@@ -649,7 +665,7 @@ class ResetBudgetJob:
             if len(failed_teams) > 0:  # If any teams failed to reset
                 raise Exception(f"Failed to reset {len(failed_teams)} teams: {json.dumps(failed_teams, default=str)}")
 
-            asyncio.create_task(
+            _service_logging_task = asyncio.create_task(
                 self.proxy_logging_obj.service_logging_obj.async_service_success_hook(
                     service=ServiceTypes.RESET_BUDGET_JOB,
                     duration=end_time - start_time,
@@ -666,9 +682,11 @@ class ResetBudgetJob:
                     },
                 )
             )
+            self._service_logging_tasks.add(_service_logging_task)
+            _service_logging_task.add_done_callback(self._service_logging_tasks.discard)
         except Exception as e:
             end_time = time.time()
-            asyncio.create_task(
+            _service_logging_task = asyncio.create_task(
                 self.proxy_logging_obj.service_logging_obj.async_service_failure_hook(
                     service=ServiceTypes.RESET_BUDGET_JOB,
                     duration=end_time - start_time,
@@ -682,6 +700,8 @@ class ResetBudgetJob:
                     },
                 )
             )
+            self._service_logging_tasks.add(_service_logging_task)
+            _service_logging_task.add_done_callback(self._service_logging_tasks.discard)
             verbose_proxy_logger.exception("Failed to reset budget for teams: %s", e)
 
     @staticmethod
