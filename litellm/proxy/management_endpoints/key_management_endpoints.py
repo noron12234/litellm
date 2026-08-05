@@ -530,6 +530,8 @@ def common_key_access_checks(
     return True
 
 
+_key_management_event_tasks: set[asyncio.Task] = set()  # mutable-ok: task registry
+
 router: Final = APIRouter()
 
 
@@ -1146,7 +1148,7 @@ async def _common_key_generation_helper(
 
     response.token = response.token_id  # remap token to use the hash, and leave the key in the `key` field [TODO]: clean up generate_key_helper_fn to do this
 
-    asyncio.create_task(
+    _key_event_task = asyncio.create_task(
         KeyManagementEventHooks.async_key_generated_hook(
             data=data,
             response=response,
@@ -1154,6 +1156,8 @@ async def _common_key_generation_helper(
             litellm_changed_by=litellm_changed_by,
         )
     )
+    _key_management_event_tasks.add(_key_event_task)
+    _key_event_task.add_done_callback(_key_management_event_tasks.discard)
 
     return response
 
@@ -2299,7 +2303,7 @@ async def _process_single_key_update(
     )
 
     # Trigger async hook
-    asyncio.create_task(
+    _key_event_task = asyncio.create_task(
         KeyManagementEventHooks.async_key_updated_hook(
             data=update_key_request,
             existing_key_row=existing_key_row,
@@ -2308,6 +2312,8 @@ async def _process_single_key_update(
             litellm_changed_by=litellm_changed_by,
         )
     )
+    _key_management_event_tasks.add(_key_event_task)
+    _key_event_task.add_done_callback(_key_management_event_tasks.discard)
 
     if response is None:
         raise ValueError("Failed to update key got response = None")
@@ -2783,7 +2789,7 @@ async def update_key_fn(
                         redis_err,
                     )
 
-        asyncio.create_task(
+        _key_event_task = asyncio.create_task(
             KeyManagementEventHooks.async_key_updated_hook(
                 data=data,
                 existing_key_row=existing_key_row,
@@ -2792,6 +2798,8 @@ async def update_key_fn(
                 litellm_changed_by=litellm_changed_by,
             )
         )
+        _key_management_event_tasks.add(_key_event_task)
+        _key_event_task.add_done_callback(_key_management_event_tasks.discard)
 
         if response is None:
             raise ValueError("Failed to update key got response = None")
@@ -3356,7 +3364,7 @@ async def delete_key_fn(
             "/keys/delete - cache after delete: %s", user_api_key_cache.in_memory_cache.cache_dict
         )
 
-        asyncio.create_task(
+        _key_event_task = asyncio.create_task(
             KeyManagementEventHooks.async_key_deleted_hook(
                 data=data,
                 keys_being_deleted=_keys_being_deleted,
@@ -3365,6 +3373,8 @@ async def delete_key_fn(
                 response=number_deleted_keys,
             )
         )
+        _key_management_event_tasks.add(_key_event_task)
+        _key_event_task.add_done_callback(_key_management_event_tasks.discard)
 
         return {"deleted_keys": deleted_keys}
     except Exception as e:
@@ -4636,7 +4646,7 @@ async def _execute_virtual_key_regeneration(
         )
 
     response: Final = GenerateKeyResponse.model_validate(updated_token_dict)
-    asyncio.create_task(
+    _key_event_task = asyncio.create_task(
         KeyManagementEventHooks.async_key_rotated_hook(
             data=data,
             existing_key_row=key_in_db,
@@ -4645,6 +4655,8 @@ async def _execute_virtual_key_regeneration(
             litellm_changed_by=litellm_changed_by,
         )
     )
+    _key_management_event_tasks.add(_key_event_task)
+    _key_event_task.add_done_callback(_key_management_event_tasks.discard)
     return response
 
 
@@ -6114,7 +6126,7 @@ async def block_key(
         )
 
     if litellm.store_audit_logs is True:
-        asyncio.create_task(
+        _audit_log_task = asyncio.create_task(
             create_audit_log_for_update(
                 request_data=LiteLLM_AuditLogs(
                     id=str(uuid.uuid4()),
@@ -6133,6 +6145,8 @@ async def block_key(
                 )
             )
         )
+        _key_management_event_tasks.add(_audit_log_task)
+        _audit_log_task.add_done_callback(_key_management_event_tasks.discard)
 
     record: Final = await _prisma_table(VerificationTokenRepository(prisma_client)).update(
         where={"token": hashed_token},
@@ -6227,7 +6241,7 @@ async def unblock_key(
         )
 
     if litellm.store_audit_logs is True:
-        asyncio.create_task(
+        _audit_log_task = asyncio.create_task(
             create_audit_log_for_update(
                 request_data=LiteLLM_AuditLogs(
                     id=str(uuid.uuid4()),
@@ -6246,6 +6260,8 @@ async def unblock_key(
                 )
             )
         )
+        _key_management_event_tasks.add(_audit_log_task)
+        _audit_log_task.add_done_callback(_key_management_event_tasks.discard)
 
     record: Final = await _prisma_table(VerificationTokenRepository(prisma_client)).update(
         where={"token": hashed_token},

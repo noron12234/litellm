@@ -4,6 +4,7 @@ Tests for KeyManagementEventHooks.
 Validates that email and secret manager operations are independent and non-blocking.
 """
 
+import asyncio
 import os
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -12,7 +13,10 @@ import pytest
 
 sys.path.insert(0, os.path.abspath("../../../.."))
 
-from litellm.proxy.hooks.key_management_event_hooks import KeyManagementEventHooks
+from litellm.proxy.hooks.key_management_event_hooks import (
+    KeyManagementEventHooks,
+    _key_management_event_hook_tasks,
+)
 
 
 class TestKeyManagementEventHooksIndependentOperations:
@@ -504,3 +508,62 @@ class TestKeyUpdatedAuditLogObjectId:
         audit_row = await self._run_updated_hook_and_capture_audit_log(request_key=hashed_key)
 
         assert audit_row.object_id == hashed_key
+
+
+class TestAuditLogTaskReferenceHeld:
+    """async_key_generated_hook fires its audit-log write via a bare
+    asyncio.create_task with no caller-side await; the event loop only holds a
+    weak reference, so without a held strong reference the task can be
+    garbage-collected before it runs the write."""
+
+    @pytest.mark.asyncio
+    async def test_audit_log_task_is_tracked_until_completion(self):
+        assert len(_key_management_event_hook_tasks) == 0
+
+        audit_log_started = asyncio.Event()
+        audit_log_release = asyncio.Event()
+
+        async def blocking_audit_log_write(request_data):
+            audit_log_started.set()
+            await audit_log_release.wait()
+
+        mock_data = MagicMock()
+        mock_data.send_invite_email = False
+        mock_data.team_id = None
+        mock_data.key_alias = "test-key-alias"
+
+        mock_response = MagicMock()
+        mock_response.token_id = "token-123"
+        mock_response.model_dump_json.return_value = '{"key": "sk-test"}'
+
+        mock_user_api_key_dict = MagicMock()
+        mock_user_api_key_dict.api_key = "api-key-123"
+
+        with (
+            patch("litellm.store_audit_logs", True),
+            patch(
+                "litellm.proxy.management_helpers.audit_logs.create_audit_log_for_update",
+                side_effect=blocking_audit_log_write,
+            ),
+            patch.object(
+                KeyManagementEventHooks,
+                "_store_virtual_key_in_secret_manager",
+                new=AsyncMock(),
+            ),
+        ):
+            await KeyManagementEventHooks.async_key_generated_hook(
+                data=mock_data,
+                response=mock_response,
+                user_api_key_dict=mock_user_api_key_dict,
+            )
+            await audit_log_started.wait()
+
+            assert len(_key_management_event_hook_tasks) == 1
+
+            audit_log_release.set()
+            for _ in range(100):
+                if len(_key_management_event_hook_tasks) == 0:
+                    break
+                await asyncio.sleep(0.01)
+
+        assert len(_key_management_event_hook_tasks) == 0

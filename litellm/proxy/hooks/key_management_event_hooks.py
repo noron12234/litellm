@@ -23,6 +23,8 @@ from litellm.proxy.utils import _hash_token_if_needed
 # NOTE: This is the prefix for all virtual keys stored in AWS Secrets Manager
 LITELLM_PREFIX_STORED_VIRTUAL_KEYS: Final = "litellm/"
 
+_key_management_event_hook_tasks: set[asyncio.Task] = set()  # mutable-ok: task registry
+
 
 class KeyManagementEventHooks:
     @staticmethod
@@ -56,7 +58,7 @@ class KeyManagementEventHooks:
         # Enterprise Feature - Audit Logging. Enable with litellm.store_audit_logs = True
         if litellm.store_audit_logs is True:
             _updated_values: Final = response.model_dump_json(exclude_none=True)
-            asyncio.create_task(
+            _audit_log_task = asyncio.create_task(
                 create_audit_log_for_update(
                     request_data=LiteLLM_AuditLogs(
                         id=str(uuid.uuid4()),
@@ -75,6 +77,8 @@ class KeyManagementEventHooks:
                     )
                 )
             )
+            _key_management_event_hook_tasks.add(_audit_log_task)
+            _audit_log_task.add_done_callback(_key_management_event_hook_tasks.discard)
 
         # Store the generated key in the secret manager - non-blocking, independent operation
         try:
@@ -113,7 +117,7 @@ class KeyManagementEventHooks:
             _before_value = existing_key_row.json(exclude_none=True)
             _before_value = json.dumps(_before_value, default=str)
 
-            asyncio.create_task(
+            _audit_log_task = asyncio.create_task(
                 create_audit_log_for_update(
                     request_data=LiteLLM_AuditLogs(
                         id=str(uuid.uuid4()),
@@ -132,6 +136,8 @@ class KeyManagementEventHooks:
                     )
                 )
             )
+            _key_management_event_hook_tasks.add(_audit_log_task)
+            _audit_log_task.add_done_callback(_key_management_event_hook_tasks.discard)
 
     @staticmethod
     async def async_key_rotated_hook(
@@ -181,7 +187,7 @@ class KeyManagementEventHooks:
 
         # store the audit log
         if litellm.store_audit_logs is True and existing_key_row.token is not None:
-            asyncio.create_task(
+            _audit_log_task = asyncio.create_task(
                 create_audit_log_for_update(
                     request_data=LiteLLM_AuditLogs(
                         id=str(uuid.uuid4()),
@@ -200,6 +206,8 @@ class KeyManagementEventHooks:
                     )
                 )
             )
+            _key_management_event_hook_tasks.add(_audit_log_task)
+            _audit_log_task.add_done_callback(_key_management_event_hook_tasks.discard)
 
     @staticmethod
     async def async_key_deleted_hook(
@@ -230,7 +238,7 @@ class KeyManagementEventHooks:
                     continue
                 _key_row = key.model_dump_json(exclude_none=True)
 
-                asyncio.create_task(
+                _audit_log_task = asyncio.create_task(
                     create_audit_log_for_update(
                         request_data=LiteLLM_AuditLogs(
                             id=str(uuid.uuid4()),
@@ -249,6 +257,8 @@ class KeyManagementEventHooks:
                         )
                     )
                 )
+                _key_management_event_hook_tasks.add(_audit_log_task)
+                _audit_log_task.add_done_callback(_key_management_event_hook_tasks.discard)
         # delete the keys from the secret manager
         await KeyManagementEventHooks._delete_virtual_keys_from_secret_manager(keys_being_deleted=keys_being_deleted)
 
@@ -504,11 +514,13 @@ class KeyManagementEventHooks:
                 key_alias=response.get("key_alias", None),
             )
             # If user configured email alerting - send an Email letting their end-user know the key was created
-            asyncio.create_task(
+            _email_task = asyncio.create_task(
                 proxy_logging_obj.slack_alerting_instance.send_key_created_or_user_invited_email(
                     webhook_event=event,
                 )
             )
+            _key_management_event_hook_tasks.add(_email_task)
+            _email_task.add_done_callback(_key_management_event_hook_tasks.discard)
 
     @staticmethod
     async def _send_key_rotated_email(response: dict, existing_key_alias: str | None):
